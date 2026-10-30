@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="utf-8">
+    <title>S3-06 — MediaPipe Hand Landmarker : la main pilote la scène</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #202020;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #info {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            color: #ddd;
+            font: 13px/1.4 system-ui, sans-serif;
+            z-index: 1;
+            max-width: 60%;
+        }
+
+        #cam {
+            position: absolute;
+            right: 8px;
+            bottom: 8px;
+            width: 240px;
+            border-radius: 6px;
+            transform: scaleX(-1);
+            opacity: 0.85;
+        }
+    </style>
+    <script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.0/examples/jsm/",
+      "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs"
+  } }
+  </script>
+</head>
+
+<body>
+    <div id="info"><button id="start">Démarrer</button> — 21 repères par main, projetés dans la scène ; pincez
+        (pouce–index) pour attraper le cube</div>
+    <video id="cam" autoplay playsinline muted></video>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+
+        const info = document.getElementById('info');
+        const video = document.getElementById('cam');
+
+        // ---------------------------------------------------------------- three.js
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x202020);
+        const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+        camera.position.set(0, 0, 6);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+        const controls = new OrbitControls(camera, renderer.domElement); controls.enabled = false;
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 2.5));
+
+        // Le « squelette » : 21 sphères + segments, pour 2 mains au plus
+        const CONNECTIONS = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12],
+        [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [17, 18], [18, 19], [19, 20], [0, 17]];
+        function makeHand(color) {
+            const g = new THREE.Group();
+            const joints = new THREE.InstancedMesh(new THREE.SphereGeometry(0.06, 12, 8), new THREE.MeshStandardMaterial({ color }), 21);
+            const bonesGeo = new THREE.BufferGeometry();
+            bonesGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(CONNECTIONS.length * 6), 3));
+            const bones = new THREE.LineSegments(bonesGeo, new THREE.LineBasicMaterial({ color }));
+            g.add(joints, bones); g.visible = false; scene.add(g);
+            return { group: g, joints, bones };
+        }
+        const hands = [makeHand(0xe1611e), makeHand(0x3b7dd8)];
+
+        // L'objet à attraper
+        const cube = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.8), new THREE.MeshStandardMaterial({ color: 0x4caf50 }));
+        scene.add(cube);
+
+        // Repères normalisés MediaPipe (x,y ∈ [0,1], origine en haut à gauche, z relatif) → coordonnées scène
+        const VIEW_W = 8, VIEW_H = 6;              // taille du « plan image » dans la scène, à z = 0
+        const toScene = (lm, out) => out.set((0.5 - lm.x) * VIEW_W,   // miroir : la main droite apparaît à droite
+            (0.5 - lm.y) * VIEW_H,
+            -lm.z * VIEW_W);          // z : profondeur relative au poignet
+
+        // ---------------------------------------------------------------- MediaPipe
+        let landmarker;
+        async function initMediaPipe() {
+            info.textContent = 'Chargement du modèle MediaPipe…';
+            // 1. Le runtime WASM (depuis le CDN) …
+            const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm');
+            // 2. … puis la tâche et son modèle (.task, ~8 Mo, hébergé par Google)
+            landmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+                    delegate: 'GPU',                        // WebGL/WebGPU si possible, sinon CPU (WASM)
+                },
+                runningMode: 'VIDEO',                     // suivi entre images (plus rapide que IMAGE)
+                numHands: 2,
+            });
+            info.textContent = 'Modèle prêt — montrez vos mains ; pincez pour attraper le cube.';
+        }
+
+        document.getElementById('start').onclick = async () => {
+            video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+            await video.play();
+            try { await initMediaPipe(); } catch (e) { info.textContent = 'MediaPipe indisponible : ' + e.message; console.error(e); }
+        };
+
+        // ---------------------------------------------------------------- Boucle
+        const p = new THREE.Vector3(), q = new THREE.Vector3(), dummy = new THREE.Object3D();
+        let lastVideoTime = -1, grabbed = false;
+
+        renderer.setAnimationLoop((t) => {
+            if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                // Détection : synchrone, sur la frame courante, avec un horodatage croissant
+                const result = landmarker.detectForVideo(video, performance.now());
+                hands.forEach(h => h.group.visible = false);
+
+                result.landmarks.forEach((lm, hi) => {
+                    const h = hands[hi]; h.group.visible = true;
+                    const pos = h.bones.geometry.attributes.position;
+                    lm.forEach((l, i) => { toScene(l, p); dummy.position.copy(p); dummy.updateMatrix(); h.joints.setMatrixAt(i, dummy.matrix); });
+                    h.joints.instanceMatrix.needsUpdate = true;
+                    CONNECTIONS.forEach(([a, b], i) => { toScene(lm[a], p); toScene(lm[b], q); pos.setXYZ(i * 2, p.x, p.y, p.z); pos.setXYZ(i * 2 + 1, q.x, q.y, q.z); });
+                    pos.needsUpdate = true;
+
+                    // Geste « pince » : distance pouce (4) – index (8) en coordonnées normalisées
+                    const pinch = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) < 0.05;
+                    if (hi === 0) {
+                        toScene(lm[8], p);                           // bout de l'index
+                        if (pinch && (grabbed || p.distanceTo(cube.position) < 1)) {
+                            grabbed = true; cube.position.lerp(p, 0.5); cube.material.color.set(0xe1611e);
+                        } else { grabbed = false; cube.material.color.set(0x4caf50); }
+                        // Rotation du cube selon l'orientation de la main (poignet → majeur)
+                        toScene(lm[0], q); cube.rotation.z = Math.atan2(p.y - q.y, p.x - q.x) - Math.PI / 2;
+                    }
+                });
+                const labels = result.handedness.map(h => h[0]?.categoryName).join(', ');
+                if (labels) info.textContent = `Mains détectées : ${labels}${grabbed ? ' — cube attrapé' : ''}`;
+            }
+            cube.rotation.y += 0.005;
+            renderer.render(scene, camera);
+        });
+        addEventListener('resize', () => {
+            camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+        });
+    </script>
+</body>
+</html>
