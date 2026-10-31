@@ -14,7 +14,9 @@
         }
 
         canvas {
-            display: block;
+            position: fixed;
+            inset: 0;
+            z-index: 1;
         }
 
         #info {
@@ -23,18 +25,18 @@
             left: 8px;
             color: #ddd;
             font: 13px/1.4 system-ui, sans-serif;
-            z-index: 1;
+            z-index: 2;
             max-width: 60%;
         }
 
         #cam {
-            position: absolute;
-            right: 8px;
-            bottom: 8px;
-            width: 240px;
-            border-radius: 6px;
-            transform: scaleX(-1);
-            opacity: 0.85;
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);    /* Effet miroir */
+            z-index: 0;
         }
     </style>
     <script type="importmap">
@@ -60,10 +62,10 @@
 
         // ---------------------------------------------------------------- three.js
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x202020);
         const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
         camera.position.set(0, 0, 6);
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); //alpha: true -> rend le fond transparent pour voir l'image de la caméra
+        renderer.setClearColor(0x000000, 0)
         renderer.setSize(innerWidth, innerHeight);
         renderer.setPixelRatio(devicePixelRatio);
         document.body.appendChild(renderer.domElement);
@@ -89,10 +91,27 @@
         scene.add(cube);
 
         // Repères normalisés MediaPipe (x,y ∈ [0,1], origine en haut à gauche, z relatif) → coordonnées scène
-        const VIEW_W = 8, VIEW_H = 6;              // taille du « plan image » dans la scène, à z = 0
-        const toScene = (lm, out) => out.set((0.5 - lm.x) * VIEW_W,   // miroir : la main droite apparaît à droite
+        let VIEW_W = 8, VIEW_H = 6;              // taille du « plan image » dans la scène, à z = 0
+
+        function updateView(){
+            const view_h = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov/2)) * camera.position.z; // calcul de la hauteur du plan 
+            const view_w = view_h * camera.aspect; // camera.aspect = largeur/hauteur de la fenêtre
+            const video_aspect = (video.videoWidth || 640) / (video.videoHeight || 480);
+            if (camera.aspect > video_aspect){  // si l'écran est plus large que la vidéo on agrandit la vidéo pour combler la largeur
+                VIEW_W = view_w;
+                VIEW_H = view_h/video_aspect;
+            } else {  // si l'écran est plus étroit que la vidéo on agrandit la vidéo pour combler la hauteur
+                VIEW_H = view_w;
+                VIEW_W = view_h * video_aspect;
+            }
+        }
+        updateView()  // initialise les premières valeurs
+        video.addEventListener('loadmetadata', updateview) // refait les calculs quand on a les vrai valeurs de videoHeight et videoWidth
+
+        const toScene = (lm, out) => out.set(
+            (0.5 - lm.x) * VIEW_W,   // miroir : la main droite apparaît à droite
             (0.5 - lm.y) * VIEW_H,
-            -lm.z * VIEW_W);          // z : profondeur relative au poignet
+            -lm.z * VIEW_W * 0.3);          // z : profondeur relative au poignet (0.3 à modifier si besoin pour les effets de profondeurs)
 
         // ---------------------------------------------------------------- MediaPipe
         let landmarker;
