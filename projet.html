@@ -86,9 +86,6 @@
         }
         const hands = [makeHand(0xe1611e), makeHand(0x3b7dd8)];
 
-        // L'objet à attraper
-        const cube = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.8), new THREE.MeshStandardMaterial({ color: 0x4caf50 }));
-        scene.add(cube);
 
         // Repères normalisés MediaPipe (x,y ∈ [0,1], origine en haut à gauche, z relatif) → coordonnées scène
         let VIEW_W = 8, VIEW_H = 6;              // taille du « plan image » dans la scène, à z = 0
@@ -138,8 +135,12 @@
         };
 
         // ---------------------------------------------------------------- Boucle
+        const pointGeo = new THREE.SphereGeometry(0.09, 16, 12);
+        const pointMat = new THREE.MeshStandardMaterial({color: 0xffab3b});
+        const points = [];
+        let wasPinched = false;
         const p = new THREE.Vector3(), q = new THREE.Vector3(), dummy = new THREE.Object3D();
-        let lastVideoTime = -1, grabbed = false;
+        let lastVideoTime = -1;
 
         renderer.setAnimationLoop((t) => {
             if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
@@ -147,6 +148,8 @@
                 // Détection : synchrone, sur la frame courante, avec un horodatage croissant
                 const result = landmarker.detectForVideo(video, performance.now());
                 hands.forEach(h => h.group.visible = false);
+
+                let pinchingNow = false;
 
                 result.landmarks.forEach((lm, hi) => {
                     const h = hands[hi]; h.group.visible = true;
@@ -159,18 +162,21 @@
                     // Geste « pince » : distance pouce (4) – index (8) en coordonnées normalisées
                     const pinch = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) < 0.05;
                     if (hi === 0) {
-                        toScene(lm[8], p);                           // bout de l'index
-                        if (pinch && (grabbed || p.distanceTo(cube.position) < 1)) {
-                            grabbed = true; cube.position.lerp(p, 0.5); cube.material.color.set(0xe1611e);
-                        } else { grabbed = false; cube.material.color.set(0x4caf50); }
-                        // Rotation du cube selon l'orientation de la main (poignet → majeur)
-                        toScene(lm[0], q); cube.rotation.z = Math.atan2(p.y - q.y, p.x - q.x) - Math.PI / 2;
+                        toScene(lm[8], p); // bout de l'index
+                        pinchingNow = pinch;
+                        if (pinch && !wasPinched) { 
+                            const point = new THREE.Mesh(pointGeo, pointMat);
+                            point.position.set(p.x, p.y, 0); // On met le point à la position de l'index
+                            scene.add(point);
+                            points.push(point);
+                        }
                     }
                 });
+
+                wasPinched = pinchingNow;
                 const labels = result.handedness.map(h => h[0]?.categoryName).join(', ');
-                if (labels) info.textContent = `Mains détectées : ${labels}${grabbed ? ' — cube attrapé' : ''}`;
+                if (labels) info.textContent = `Mains détectées : ${labels}${pinchingNow ? 'Pinching' : ''} - ${points.length} point(s)`;
             }
-            cube.rotation.y += 0.005;
             renderer.render(scene, camera);
         });
         addEventListener('resize', () => {
