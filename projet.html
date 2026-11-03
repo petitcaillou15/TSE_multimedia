@@ -138,7 +138,8 @@
         const pointGeo = new THREE.SphereGeometry(0.09, 16, 12);
         const pointMat = new THREE.MeshStandardMaterial({color: 0xffab3b});
         const points = [];
-        let wasPinched = false;
+        let wasPinched0 = false;
+        let wasPinched1 = false;
         const p = new THREE.Vector3(), q = new THREE.Vector3(), dummy = new THREE.Object3D();
         let lastVideoTime = -1;
 
@@ -149,7 +150,8 @@
                 const result = landmarker.detectForVideo(video, performance.now());
                 hands.forEach(h => h.group.visible = false);
 
-                let pinchingNow = false;
+                let pinchingNow0 = false; // Main principale
+                let pinchingNow1 = false; // Main secondaire
 
                 result.landmarks.forEach((lm, hi) => {
                     const h = hands[hi]; h.group.visible = true;
@@ -163,19 +165,35 @@
                     const pinch = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) < 0.05;
                     if (hi === 0) {
                         toScene(lm[8], p); // bout de l'index
-                        pinchingNow = pinch;
-                        if (pinch && !wasPinched) { 
+                        pinchingNow0 = pinch;
+                        if (pinch && !wasPinched0) { 
                             const point = new THREE.Mesh(pointGeo, pointMat);
                             point.position.set(p.x, p.y, 0); // On met le point à la position de l'index
                             scene.add(point);
                             points.push(point);
                         }
                     }
+
+                    if (hi === 1) {
+                        toScene(lm[8], p); // bout de l'index de la 2e main 
+                        pinchingNow1 = pinch;
+                        if (pinch && !wasPinched1) { 
+                            for (let i = points.length - 1; i >= 0 ; i--){ // On parcours à l'envers car lors de la suppression tous les points on leur indice qui décale vers la gauche
+                                const pt = points[i];
+                                if (Math.hypot(pt.position.x - p.x, pt.position.y - p.y) < 0.3){
+                                    scene.remove(pt);
+                                    points.splice(i, 1);
+                                    
+                                }
+                            }
+                        }
+                    }
                 });
 
-                wasPinched = pinchingNow;
+                wasPinched0 = pinchingNow0;
+                wasPinched1 = pinchingNow1;
                 const labels = result.handedness.map(h => h[0]?.categoryName).join(', ');
-                if (labels) info.textContent = `Mains détectées : ${labels}${pinchingNow ? 'Pinching' : ''} - ${points.length} point(s)`;
+                if (labels) info.textContent = `Mains détectées : ${labels}${pinchingNow0 ? ' Pinching' : ''} - ${points.length} point(s)`;
             }
             renderer.render(scene, camera);
         });
