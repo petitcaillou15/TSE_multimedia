@@ -23,7 +23,7 @@
             position: absolute;
             top: 8px;
             left: 8px;
-            color: #ddd;
+            color: #312828;
             font: 13px/1.4 system-ui, sans-serif;
             z-index: 2;
             max-width: 60%;
@@ -35,7 +35,8 @@
             width: 100%;
             height: 100%;
             object-fit: cover;
-            transform: scaleX(-1);    /* Effet miroir */
+            transform: scaleX(-1);
+            /* Effet miroir */
             z-index: 0;
         }
     </style>
@@ -90,13 +91,13 @@
         // Repères normalisés MediaPipe (x,y ∈ [0,1], origine en haut à gauche, z relatif) → coordonnées scène
         let VIEW_W = 8, VIEW_H = 6;              // taille du « plan image » dans la scène, à z = 0
 
-        function updateView(){
-            const view_h = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov/2)) * camera.position.z; // calcul de la hauteur du plan 
+        function updateView() {
+            const view_h = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.position.z; // calcul de la hauteur du plan 
             const view_w = view_h * camera.aspect; // camera.aspect = largeur/hauteur de la fenêtre
             const video_aspect = (video.videoWidth || 640) / (video.videoHeight || 480);
-            if (camera.aspect > video_aspect){  // si l'écran est plus large que la vidéo on agrandit la vidéo pour combler la largeur
+            if (camera.aspect > video_aspect) {  // si l'écran est plus large que la vidéo on agrandit la vidéo pour combler la largeur
                 VIEW_W = view_w;
-                VIEW_H = view_w/video_aspect;
+                VIEW_H = view_w / video_aspect;
             } else {  // si l'écran est plus étroit que la vidéo on agrandit la vidéo pour combler la hauteur
                 VIEW_H = view_h;
                 VIEW_W = view_h * video_aspect;
@@ -125,7 +126,7 @@
                 runningMode: 'VIDEO',                     // suivi entre images (plus rapide que IMAGE)
                 numHands: 2,
             });
-            info.textContent = 'Modèle prêt — montrez vos mains ; pincez pour attraper le cube.';
+            info.textContent = 'Modèle prêt — montrez vos mains ; Pincez avec la main orange pour placer un point ; Pincez avec la main bleue pour effacer un point ; Pincer avec les deux mains pour passer l image en nuance de gris';
         }
 
         document.getElementById('start').onclick = async () => {
@@ -135,8 +136,62 @@
         };
 
         // ---------------------------------------------------------------- Boucle
+        const videoTex = new THREE.VideoTexture(video);
+
+        const videoUniform = {
+            uVideo: { value: videoTex },
+            uViewW: { value: VIEW_W },
+            uViewH: { value: VIEW_H }
+        };
+
+        const videoMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(1, 1),
+            new THREE.ShaderMaterial({
+                uniforms: videoUniform,
+                vertexShader: `
+                    varying vec3 vWorld;
+                    void main() {
+                        vec4 w = modelMatrix * vec4(position, 1.0); // position dans le repère monde
+                        vWorld = w.xyz; // on transmet au fragment shader
+                        gl_Position = projectionMatrix * viewMatrix * w; // position dans le repère caméra
+                    }`,
+                fragmentShader: `
+                    uniform sampler2D uVideo;
+                    uniform float uViewW, uViewH;
+                    varying vec3 vWorld;
+                    void main() {
+                        vec2 uv = vec2(0.5 - vWorld.x / uViewW, 0.5 + vWorld.y / uViewH); 
+                        vec3 c = texture2D(uVideo, uv).rgb; // lecture de la couleur vidéo
+                        float gray = dot(c, vec3(0.299, 0.587, 0.114)); // conversion en niveaux de gris (calcul de luminance pondéré par la perception humaine)
+                        gl_FragColor = vec4(vec3(gray), 1.0);
+                    }`
+            })
+        );
+
+        videoMesh.visible = false;
+
+        scene.add(videoMesh);
+
+        const borderGeo = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(-0.5, -0.5, 0),
+            new THREE.Vector3(0.5, -0.5, 0),
+            new THREE.Vector3(0.5, 0.5, 0),
+            new THREE.Vector3(-0.5, 0.5, 0),
+        ]);
+
+        const border = new THREE.LineLoop(
+            borderGeo,
+            new THREE.LineBasicMaterial({ color: 0xfffff })
+        );
+
+        videoMesh.add(border);
+
+        const pinches = [false, false]; // état du pincement (pouce–index) pour chaque main
+        const tips = [new THREE.Vector3(), new THREE.Vector3()]; // position du bout de l'index pour chaque main
+
+
         const pointGeo = new THREE.SphereGeometry(0.09, 16, 12);
-        const pointMat = new THREE.MeshStandardMaterial({color: 0xffab3b});
+        const pointMat = new THREE.MeshStandardMaterial({ color: 0xffab3b });
         const points = [];
         let wasPinched0 = false;
         let wasPinched1 = false;
@@ -150,55 +205,76 @@
                 const result = landmarker.detectForVideo(video, performance.now());
                 hands.forEach(h => h.group.visible = false);
 
-                let pinchingNow0 = false; // Main principale
-                let pinchingNow1 = false; // Main secondaire
+                pinches[0] = pinches[1] = false;
 
                 result.landmarks.forEach((lm, hi) => {
-                    const h = hands[hi]; h.group.visible = true;
+                    const h = hands[hi];
+                    h.group.visible = true;
                     const pos = h.bones.geometry.attributes.position;
-                    lm.forEach((l, i) => { toScene(l, p); dummy.position.copy(p); dummy.updateMatrix(); h.joints.setMatrixAt(i, dummy.matrix); });
+                    lm.forEach((l, i) => {
+                        toScene(l, p);
+                        dummy.position.copy(p);
+                        dummy.updateMatrix();
+                        h.joints.setMatrixAt(i, dummy.matrix);
+                    });
                     h.joints.instanceMatrix.needsUpdate = true;
-                    CONNECTIONS.forEach(([a, b], i) => { toScene(lm[a], p); toScene(lm[b], q); pos.setXYZ(i * 2, p.x, p.y, p.z); pos.setXYZ(i * 2 + 1, q.x, q.y, q.z); });
+                    CONNECTIONS.forEach(([a, b], i) => {
+                        toScene(lm[a], p);
+                        toScene(lm[b], q);
+                        pos.setXYZ(i * 2, p.x, p.y, p.z);
+                        pos.setXYZ(i * 2 + 1, q.x, q.y, q.z);
+                    });
                     pos.needsUpdate = true;
 
-                    // Geste « pince » : distance pouce (4) – index (8) en coordonnées normalisées
-                    const pinch = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) < 0.05;
-                    if (hi === 0) {
-                        toScene(lm[8], p); // bout de l'index
-                        pinchingNow0 = pinch;
-                        if (pinch && !wasPinched0) { 
-                            const point = new THREE.Mesh(pointGeo, pointMat);
-                            point.position.set(p.x, p.y, 0); // On met le point à la position de l'index
-                            scene.add(point);
-                            points.push(point);
-                        }
+                    pinches[hi] = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) < 0.05; // distance pouce–index en coordonnées normalisées
+                    toScene(lm[8], tips[hi]); // on mémorise la position du bout de l'index pour chaque main
+                });
+
+                const both = pinches[0] && pinches[1]; // les deux mains pincent en même temps
+
+                if (both) {
+                    videoMesh.position.set((tips[0].x + tips[1].x) / 2, (tips[0].y + tips[1].y) / 2, 0); // on place le plan vidéo au milieu des deux mains
+                    videoMesh.scale.set(
+                        Math.max(Math.abs(tips[0].x - tips[1].x), 0.01),
+                        Math.max(Math.abs(tips[0].y - tips[1].y), 0.01),
+                        1
+                    ); // on agrandit le plan vidéo pour qu'il comble l'espace entre les deux mains
+                    videoMesh.visible = true;
+                    videoUniform.uViewW.value = VIEW_W;
+                    videoUniform.uViewH.value = VIEW_H;
+                } else {
+                    videoMesh.visible = false; // on cache le plan vidéo si les deux mains ne pincent pas en même temps
+
+                    if (pinches[0] && !wasPinched0) { // main principale vient de pincer
+                        const p = new THREE.Mesh(pointGeo, pointMat);
+                        p.position.set(tips[0].x, tips[0].y, 0);
+                        scene.add(p);
+                        points.push(p);
                     }
 
-                    if (hi === 1) {
-                        toScene(lm[8], p); // bout de l'index de la 2e main 
-                        pinchingNow1 = pinch;
-                        if (pinch && !wasPinched1) { 
-                            for (let i = points.length - 1; i >= 0 ; i--){ // On parcours à l'envers car lors de la suppression tous les points on leur indice qui décale vers la gauche
-                                const pt = points[i];
-                                if (Math.hypot(pt.position.x - p.x, pt.position.y - p.y) < 0.3){
-                                    scene.remove(pt);
-                                    points.splice(i, 1);
-                                    
-                                }
+                    if (pinches[1] && !wasPinched1) { // main secondaire vient de pincer
+                        for (let i = points.length - 1; i >= 0; i--) { // on supprime le point le plus proche de la main secondaire
+                            const pt = points[i];
+                            const d = Math.hypot(pt.position.x - tips[1].x, pt.position.y - tips[1].y); // distance entre le point et le bout de l'index de la main secondaire
+                            if (d < 0.3) {
+                                scene.remove(points[i]);
+                                points.splice(i, 1);
+                                break;
                             }
                         }
                     }
-                });
+                }
 
-                wasPinched0 = pinchingNow0;
-                wasPinched1 = pinchingNow1;
+                wasPinched0 = pinches[0];
+                wasPinched1 = pinches[1];
+
                 const labels = result.handedness.map(h => h[0]?.categoryName).join(', ');
-                if (labels) info.textContent = `Mains détectées : ${labels}${pinchingNow0 ? ' Pinching' : ''} - ${points.length} point(s)`;
+                if (labels) info.textContent = `Pincez avec la main orange pour placer un point ; Pincez avec la main bleue pour effacer un point ; Pincer avec les deux mains pour passer l image en nuance de gris | Mains détectées : ${labels}${pinches[0] ? ' Pinching' : ''} - ${points.length} point(s)`;
             }
             renderer.render(scene, camera);
         });
         addEventListener('resize', () => {
-            camera.aspect = innerWidth / innerHeight; 
+            camera.aspect = innerWidth / innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(innerWidth, innerHeight);
             updateView()
