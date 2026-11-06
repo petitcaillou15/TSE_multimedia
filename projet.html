@@ -38,6 +38,7 @@
             transform: scaleX(-1);
             /* Effet miroir */
             z-index: 0;
+            opacity: 0; /* on cache la vidéo, on ne veut que la texture */  
         }
     </style>
     <script type="importmap">
@@ -90,6 +91,7 @@
 
         // Repères normalisés MediaPipe (x,y ∈ [0,1], origine en haut à gauche, z relatif) → coordonnées scène
         let VIEW_W = 8, VIEW_H = 6;              // taille du « plan image » dans la scène, à z = 0
+        let Screen = null;
 
         function updateView() {
             const view_h = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.position.z; // calcul de la hauteur du plan 
@@ -101,6 +103,12 @@
             } else {  // si l'écran est plus étroit que la vidéo on agrandit la vidéo pour combler la hauteur
                 VIEW_H = view_h;
                 VIEW_W = view_h * video_aspect;
+            }
+
+            if (Screen){
+                Screen.scale.set(VIEW_W, VIEW_H, 1);
+                Screen.material.uniforms.uViewW.value = VIEW_W;
+                Screen.material.uniforms.uViewH.value = VIEW_H;
             }
         }
         updateView()  // initialise les premières valeurs
@@ -126,7 +134,7 @@
                 runningMode: 'VIDEO',                     // suivi entre images (plus rapide que IMAGE)
                 numHands: 2,
             });
-            info.textContent = 'Modèle prêt — montrez vos mains ; Pincez avec la main orange pour placer un point ; Pincez avec la main bleue pour effacer un point ; Pincer avec les deux mains pour passer l image en nuance de gris';
+            info.textContent = 'Modèle prêt — montrez vos mains ; Pincez avec la main orange pour placer un point ; Pincez avec la main bleue pour effacer un point ; Pincer avec les deux mains pour créer un filtre; Modifier le filtre avec les doigts de la main orange (droite) et la main bleue (gauche)';
         }
 
         document.getElementById('start').onclick = async () => {
@@ -138,12 +146,84 @@
         // ---------------------------------------------------------------- Boucle
         const videoTex = new THREE.VideoTexture(video);
 
+        // Goutte d'eau
+        const maxDrops = 8;
+        const drops = [];
+        for (let i = 0; i< maxDrops; i++){
+            drops.push(new THREE.Vector3(0, 0, -100)); // On place les gouttes hors de la scène
+        }
+        let dropId = 0;
+
+        function addDrop(x, y, t){
+            drops[dropId].set(x, y, t); // On place la goutte à la position de la main et on mémorise l'instant de création
+            dropId = (dropId + 1) % maxDrops; // On remplace la goutte la plus ancienne
+        }
+
+        const screenUniforms = {
+            uVideo: { value: videoTex },
+            uViewW: { value: VIEW_W },
+            uViewH: { value: VIEW_H },
+            uDrops: { value: drops }, 
+            uTime: { value: 0 }
+        };
+
+        Screen = new THREE.Mesh(
+            new THREE.PlaneGeometry(1,1),
+            new THREE.ShaderMaterial({
+                uniforms: screenUniforms, 
+                depthTest : false,
+                depthWrite : false,
+                vertexShader:`
+                    varying vec3 vWorld;
+                    void main () {
+                        vec4 w = modelMatrix * vec4(position,1.0);
+                        vWorld = w.xyz;
+                        gl_Position = projectionMatrix * viewMatrix * w;
+                    }`,
+                fragmentShader: `
+                    uniform sampler2D uVideo;
+                    uniform float uViewW, uViewH, uTime;
+                    uniform vec3 uDrops[${maxDrops}];  // Tableau de 8 vec3
+                    varying vec3 vWorld;
+                    void main() {
+                        vec2 pos = vWorld.xy;
+                        float light = 0.0;
+
+                        for (int i = 0; i < ${maxDrops}; i++){
+                            vec3 dr = uDrops[i];
+                            float age = uTime - dr.z;
+                            if (age > 0.0 && age < 4.0){
+                                vec2 dir = pos - dr.xy;
+                                float d = length(dir);
+                                float x = d - age * 2.0;
+                                float env = exp(-x * x * 8.0) * exp(-age);
+                                float w = sin(x * 18.0) * env;
+                                pos += (dir / (d + 0.0001)) * w * 0.08;
+                                light += w;
+                            }
+                        }
+
+                        vec2 uv = vec2(0.5 - pos.x / uViewW, 0.5 + pos.y / uViewH);
+                        vec3 c = texture2D(uVideo, uv).rgb + light * 0.15;
+                        gl_FragColor = vec4(c, 1.0);
+                    }`
+            })
+        );
+
+        Screen.renderOrder = -1;
+        Screen.visible = false;
+        Screen.scale.set(VIEW_W, VIEW_H, 1);
+        scene.add(Screen);
+
+        // Image dans le rectangle 
         const videoUniform = {
             uVideo: { value: videoTex },
             uViewW: { value: VIEW_W },
             uViewH: { value: VIEW_H },
             uModeRight: { value: 0 },
-            uModeLeft: { value: 0 }
+            uModeLeft: { value: 0 },
+            uTime: {value: 0}, 
+            uDrops: {value: drops}
         };
 
         const videoMesh = new THREE.Mesh(
@@ -162,8 +242,24 @@
                         uniform float uViewW, uViewH;
                         uniform int uModeRight, uModeLeft;
                         varying vec3 vWorld;
+                        uniform float uTime;
+                        uniform vec3 uDrops[${maxDrops}];
                         void main() {
                             vec2 pos = vWorld.xy;
+                            
+                            // Ajout des ondes dans le rectangle
+                            for (int i = 0; i < ${maxDrops}; i++){
+                                vec3 dr = uDrops[i];
+                                float age = uTime - dr.z;
+                                if (age > 0.0 && age < 4.0){
+                                    vec2 dir = pos - dr.xy;
+                                    float d = length(dir);
+                                    float x = d - age * 2.0;
+                                    float env = exp(-x * x * 8.0) * exp(-age);
+                                    float w = sin(x * 18.0) * env;
+                                    pos += (dir / (d + 0.0001)) * w * 0.08;
+                                }
+                            }
 
                             if (uModeLeft == 1){  // Pixélisation
                                 float block = 0.10; // Taille du pixel
@@ -314,10 +410,7 @@
                     videoMesh.visible = false; // on cache le plan vidéo si les deux mains ne pincent pas en même temps
 
                     if (rightIndex && !wasPinchedRightIndex) { // main droite vient de pincer
-                        const p = new THREE.Mesh(pointGeo, pointMat);
-                        p.position.set(state.right.tip.x, state.right.tip.y, 0);
-                        scene.add(p);
-                        points.push(p);
+                        addDrop(state.right.tip.x, state.right.tip.y, t * 0.001);
                     }
 
                     if (leftIndex && !wasPinchedLeftIndex) { // main gauche vient de pincer
@@ -339,6 +432,9 @@
                 const seen = [state.right.present ? 'droite' : '', state.left.present ? 'gauche' : ''].filter(Boolean).join(' + ');
                 if (seen) info.textContent = `Mains : ${seen} | effet : ${NameModeRight[modeRight]} + ${NameModeLeft[modeLeft]} | ${points.length} point(s)`;
             }
+            videoUniform.uTime.value = t * 0.001;
+            Screen.material.uniforms.uTime.value = t * 0.001;
+            Screen.visible = video.readyState >= 2; // Cache le plan tant que que la wabcam n'a pas démarré
             renderer.render(scene, camera);
         });
         addEventListener('resize', () => {
