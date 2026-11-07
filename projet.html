@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <title>S3-06 — MediaPipe Hand Landmarker : la main pilote la scène</title>
+    <title>Projet multimédia LA Maxime</title>
     <style>
         html,
         body {
@@ -134,7 +134,7 @@
                 runningMode: 'VIDEO',                     // suivi entre images (plus rapide que IMAGE)
                 numHands: 2,
             });
-            info.textContent = 'Modèle prêt — montrez vos mains ; Pincez avec la main orange pour placer un point ; Pincez avec la main bleue pour effacer un point ; Pincer avec les deux mains pour créer un filtre; Modifier le filtre avec les doigts de la main orange (droite) et la main bleue (gauche)';
+            info.textContent = 'Modèle prêt — pincez avec la main droite (index) pour lancer une goutte ; pincez des deux index pour ouvrir un rectangle ; doigts de la main droite : gris / noir et blanc ; doigts de la main gauche : pixélisé / négatif.';
         }
 
         document.getElementById('start').onclick = async () => {
@@ -147,10 +147,10 @@
         const videoTex = new THREE.VideoTexture(video);
 
         // Goutte d'eau
-        const maxDrops = 8;
+        const maxDrops = 5; // On affiche au maximum 5 gouttes simultanément à l'écran
         const drops = [];
         for (let i = 0; i< maxDrops; i++){
-            drops.push(new THREE.Vector3(0, 0, -100)); // On place les gouttes hors de la scène
+            drops.push(new THREE.Vector3(0, 0, -100)); // (x, y, t), t = -100 => la goutte n'existe pas
         }
         let dropId = 0;
 
@@ -183,7 +183,7 @@
                 fragmentShader: `
                     uniform sampler2D uVideo;
                     uniform float uViewW, uViewH, uTime;
-                    uniform vec3 uDrops[${maxDrops}];  // Tableau de 8 vec3
+                    uniform vec3 uDrops[${maxDrops}];  // Tableau de 5 vec3
                     varying vec3 vWorld;
                     void main() {
                         vec2 pos = vWorld.xy;
@@ -191,14 +191,14 @@
 
                         for (int i = 0; i < ${maxDrops}; i++){
                             vec3 dr = uDrops[i];
-                            float age = uTime - dr.z;
-                            if (age > 0.0 && age < 4.0){
-                                vec2 dir = pos - dr.xy;
-                                float d = length(dir);
-                                float x = d - age * 2.0;
-                                float env = exp(-x * x * 8.0) * exp(-age);
-                                float w = sin(x * 18.0) * env;
-                                pos += (dir / (d + 0.0001)) * w * 0.08;
+                            float age = uTime - dr.z;                       // dr.z est l'instant de création de la goutte, uTime est l'instant actuel, age = durée de vie de la goutte
+                            if (age > 0.0 && age < 4.0){                    // la durée de vie d'une goutte est de 4s
+                                vec2 dir = pos - dr.xy;                     // Calcul de la distance du pixel par rapport à l'origine de la goutte d'eau
+                                float d = length(dir);                      // distance entre le pixel et l'origine de la goutte
+                                float x = d - age * 2.0;                    // Front de l'onde (avance de 2 unité par seconde), x = 0 => le pixel est sur le front
+                                float ampl = exp(-x * x * 8.0) * exp(-age); // Amplitude de l'onde : décroît avec la distance par rapport au front et avec le temps
+                                float w = sin(x * 18.0) * ampl;             // Fait alterné crête et creux de l'onde
+                                pos += (dir / (d + 0.0001)) * w * 0.08;     // On déplace le pixel dans la direction de l'origine de la goutte, proportionnellement à l'amplitude de l'onde
                                 light += w;
                             }
                         }
@@ -247,6 +247,8 @@
                         void main() {
                             vec2 pos = vWorld.xy;
                             
+                            float light = 0.0;
+
                             // Ajout des ondes dans le rectangle
                             for (int i = 0; i < ${maxDrops}; i++){
                                 vec3 dr = uDrops[i];
@@ -258,6 +260,7 @@
                                     float env = exp(-x * x * 8.0) * exp(-age);
                                     float w = sin(x * 18.0) * env;
                                     pos += (dir / (d + 0.0001)) * w * 0.08;
+                                    light += w;
                                 }
                             }
 
@@ -267,7 +270,7 @@
                             }
                                 
                             vec2 uv = vec2(0.5 - pos.x / uViewW, 0.5 + pos.y / uViewH); // Calcule la position dans la vidéo
-                            vec3 c = texture2D(uVideo, uv).rgb; // lis la couleur de la vidéo
+                            vec3 c = texture2D(uVideo, uv).rgb * (1.0 + light * 0.5); // lis la couleur de la vidéo en ajoutant l'effet de lumière des ondes
 
                             if (uModeLeft == 2){
                                 c = 1.0 - c; // Inversion des couleurs
@@ -304,10 +307,6 @@
 
         videoMesh.add(border);
 
-
-        const pointGeo = new THREE.SphereGeometry(0.09, 16, 12);
-        const pointMat = new THREE.MeshStandardMaterial({ color: 0xffab3b });
-        const points = [];
         const p = new THREE.Vector3(), q = new THREE.Vector3(), dummy = new THREE.Object3D();
         let lastVideoTime = -1;
 
@@ -323,7 +322,6 @@
         const NameModeRight = ['Normal', 'Nuance de gris', 'Noir et blanc'];
         const NameModeLeft = ['Normal', 'Pixélisé', 'Négatif'];
         let wasPinchedRightIndex = false;
-        let wasPinchedLeftIndex = false;
 
         renderer.setAnimationLoop((t) => {
 
@@ -376,7 +374,7 @@
                     pos.needsUpdate = true;
 
                     s.present = true;
-                    s.finger = pinchedFinger(lm, 0.05)
+                    s.finger = pinchedFinger(lm, 0.03)
                     toScene(lm[8], s.tip); // on mémorise la position du bout de l'index pour chaque main
                 });
 
@@ -412,25 +410,13 @@
                     if (rightIndex && !wasPinchedRightIndex) { // main droite vient de pincer
                         addDrop(state.right.tip.x, state.right.tip.y, t * 0.001);
                     }
-
-                    if (leftIndex && !wasPinchedLeftIndex) { // main gauche vient de pincer
-                        for (let i = points.length - 1; i >= 0; i--) { // on supprime le point le plus proche de la main gauche
-                            const pt = points[i];
-                            const d = Math.hypot(pt.position.x - state.left.tip.x, pt.position.y - state.left.tip.y); // distance entre le point et le bout de l'index de la main secondaire
-                            if (d < 0.3) {
-                                scene.remove(points[i]);
-                                points.splice(i, 1);
-                                break;
-                            }
-                        }
-                    }
                 }
 
+
                 wasPinchedRightIndex = rightIndex;
-                wasPinchedLeftIndex = leftIndex;
 
                 const seen = [state.right.present ? 'droite' : '', state.left.present ? 'gauche' : ''].filter(Boolean).join(' + ');
-                if (seen) info.textContent = `Mains : ${seen} | effet : ${NameModeRight[modeRight]} + ${NameModeLeft[modeLeft]} | ${points.length} point(s)`;
+                if (seen) info.textContent = `Mains : ${seen} | effet : ${NameModeRight[modeRight]} + ${NameModeLeft[modeLeft]}`;
             }
             videoUniform.uTime.value = t * 0.001;
             Screen.material.uniforms.uTime.value = t * 0.001;
