@@ -23,7 +23,7 @@
             position: absolute;
             top: 8px;
             left: 8px;
-            color: #312828;
+            color: #ffffff;
             font: 13px/1.4 system-ui, sans-serif;
             z-index: 2;
             max-width: 60%;
@@ -38,8 +38,41 @@
             transform: scaleX(-1);
             /* Effet miroir */
             z-index: 0;
-            opacity: 0; /* on cache la vidéo, on ne veut que la texture */  
+            opacity: 0;
+            /* on cache la vidéo, on ne veut que la texture */
         }
+
+        #panel {
+            position: absolute;
+            left: 16px;
+            top: 120px;
+            width: 300px;
+            padding: 12px 14px;
+            background: rgba(0, 0, 0, 0.65);
+            color: #fff;
+            font: 13px/1.5 system-ui, sans-serif;
+            border: 1px solid rgba(255, 255, 255, 0.35);
+            border-radius: 8px;
+            z-index: 2;
+            pointer-events: none;
+            user-select: none;
+        }
+
+        #panel h3 {
+            margin: 0 0 8px;
+            font-size: 14px;
+        }
+
+        #panel ul {
+            margin: 0;
+            padding-left: 18px;
+        }
+
+        #panel.grabbed {
+            border-color: #0fffff;
+        }
+
+        #panel[hidden] { display: none; }
     </style>
     <script type="importmap">
     { "imports": {
@@ -51,9 +84,21 @@
 </head>
 
 <body>
-    <div id="info"><button id="start">Démarrer</button> — 21 repères par main, projetés dans la scène ; pincez
-        (pouce–index) avec la main orage pour placer un point</div>
+    <div id="info"><button id="start">Démarrer</button> Expérience multimédia LA Maxime</div>
     <video id="cam" autoplay playsinline muted></video>
+    <div id="panel">
+        <h3>Règles : </h3>
+        <ul>
+            <li><b>Main droite (orange) :</b> pincer avec l'index pour placer une goutte d'eau</li>
+            <li><b>Main droite (orange) :</b> pincer avec le majeur (normal) / annulaire (nuances de gris) / auriculaire
+                (noir et blanc)</li>
+            <li><b>Main gauche (bleue) :</b> pincer avec l'index pour déplacer les règles </li>
+            <li><b>Main gauche (bleue) :</b> pincer avec le majeur (normal) / annulaire (pixélisé) / auriculaire
+                (négatif)</li>
+            <li><b>Deux main :</b> pincer avec les indexs pour afficher les effets</li>
+            <li><b>Touche h :</b> cacher/afficher le panneau des règles</li>
+        </ul>
+    </div>
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -105,7 +150,7 @@
                 VIEW_W = view_h * video_aspect;
             }
 
-            if (Screen){
+            if (Screen) {
                 Screen.scale.set(VIEW_W, VIEW_H, 1);
                 Screen.material.uniforms.uViewW.value = VIEW_W;
                 Screen.material.uniforms.uViewH.value = VIEW_H;
@@ -134,7 +179,7 @@
                 runningMode: 'VIDEO',                     // suivi entre images (plus rapide que IMAGE)
                 numHands: 2,
             });
-            info.textContent = 'Modèle prêt — pincez avec la main droite (index) pour lancer une goutte ; pincez des deux index pour ouvrir un rectangle ; doigts de la main droite : gris / noir et blanc ; doigts de la main gauche : pixélisé / négatif.';
+            info.textContent = 'Modèle prêt';
         }
 
         document.getElementById('start').onclick = async () => {
@@ -149,12 +194,12 @@
         // Goutte d'eau
         const maxDrops = 5; // On affiche au maximum 5 gouttes simultanément à l'écran
         const drops = [];
-        for (let i = 0; i< maxDrops; i++){
+        for (let i = 0; i < maxDrops; i++) {
             drops.push(new THREE.Vector3(0, 0, -100)); // (x, y, t), t = -100 => la goutte n'existe pas
         }
         let dropId = 0;
 
-        function addDrop(x, y, t){
+        function addDrop(x, y, t) {
             drops[dropId].set(x, y, t); // On place la goutte à la position de la main et on mémorise l'instant de création
             dropId = (dropId + 1) % maxDrops; // On remplace la goutte la plus ancienne
         }
@@ -163,17 +208,17 @@
             uVideo: { value: videoTex },
             uViewW: { value: VIEW_W },
             uViewH: { value: VIEW_H },
-            uDrops: { value: drops }, 
+            uDrops: { value: drops },
             uTime: { value: 0 }
         };
 
         Screen = new THREE.Mesh(
-            new THREE.PlaneGeometry(1,1),
+            new THREE.PlaneGeometry(1, 1),
             new THREE.ShaderMaterial({
-                uniforms: screenUniforms, 
-                depthTest : false,
-                depthWrite : false,
-                vertexShader:`
+                uniforms: screenUniforms,
+                depthTest: false,
+                depthWrite: false,
+                vertexShader: `
                     varying vec3 vWorld;
                     void main () {
                         vec4 w = modelMatrix * vec4(position,1.0);
@@ -222,8 +267,8 @@
             uViewH: { value: VIEW_H },
             uModeRight: { value: 0 },
             uModeLeft: { value: 0 },
-            uTime: {value: 0}, 
-            uDrops: {value: drops}
+            uTime: { value: 0 },
+            uDrops: { value: drops }
         };
 
         const videoMesh = new THREE.Mesh(
@@ -316,6 +361,22 @@
             right: { present: false, finger: null, tip: new THREE.Vector3() },
             left: { present: false, finger: null, tip: new THREE.Vector3() }
         };
+
+        // Panneau des règles
+        const panel = document.getElementById('panel');
+        let grabbedPanel = false;
+        let grabx = 0, graby = 0;  // Ecart entre la position du pincement et le coin en haut à gauche du panneau
+        let wasPinchedLeftIndex = false;
+        const tmp = new THREE.Vector3();
+
+        function tipToPixel(tip) {
+            tmp.set(tip.x, tip.y, 0).project(camera); // Normalisation des coordonnées de l'écran (-1 à 1)
+            return {
+                x: (tmp.x * 0.5 + 0.5) * innerWidth,
+                y: (-tmp.y * 0.5 + 0.5) * innerHeight
+            }
+        };
+
 
         let modeRight = 0;
         let modeLeft = 0;
@@ -412,12 +473,37 @@
                     }
                 }
 
+                if (leftIndex && !both) {
+                    const px = tipToPixel(state.left.tip);
 
+                    if (!wasPinchedLeftIndex) {
+                        const r = panel.getBoundingClientRect();
+                        const m = 30;
+                        if (px.x > r.left - m && px.x < r.right + m && px.y > r.top - m && px.y < r.bottom + m) {  // si on pince dans le rectangle
+                            grabbedPanel = true;
+                            grabx = px.x - r.left;
+                            graby = px.y - r.top;
+                        }
+                    }
+
+                    if (grabbedPanel) {
+                        const x = px.x - grabx, y = px.y - graby;
+                        panel.style.left = Math.min(Math.max(x, 0), innerWidth - panel.offsetWidth) + 'px';
+                        panel.style.top = Math.min(Math.max(y, 0), innerHeight - panel.offsetHeight) + 'px';
+                    }
+
+                } else {
+                    grabbedPanel = false;
+                }
+                panel.classList.toggle('grabbed', grabbedPanel);
+
+                wasPinchedLeftIndex = leftIndex;
                 wasPinchedRightIndex = rightIndex;
 
                 const seen = [state.right.present ? 'droite' : '', state.left.present ? 'gauche' : ''].filter(Boolean).join(' + ');
                 if (seen) info.textContent = `Mains : ${seen} | effet : ${NameModeRight[modeRight]} + ${NameModeLeft[modeLeft]}`;
             }
+
             videoUniform.uTime.value = t * 0.001;
             Screen.material.uniforms.uTime.value = t * 0.001;
             Screen.visible = video.readyState >= 2; // Cache le plan tant que que la wabcam n'a pas démarré
@@ -428,6 +514,13 @@
             camera.updateProjectionMatrix();
             renderer.setSize(innerWidth, innerHeight);
             updateView()
+        });
+
+        addEventListener('keydown', (e) => {
+            if (e.key === 'h') {
+                panel.hidden = !panel.hidden;
+                if (panel.hidden) grabbedPanel = false;   // On ne peut plus attraper le panneau
+            }
         });
     </script>
 </body>
